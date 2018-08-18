@@ -13,8 +13,8 @@
 #include <libnetfilter_queue/libnetfilter_queue.h>
 
 #define LEN 1
-char *warning_list[LEN] = { "www.naver.com" };
-int check_result, index;
+char *warning_list[LEN] = { "nate.com" };
+int check_result, list_index;
 
 void dump(unsigned char* buf, int size) {
     int i;
@@ -25,62 +25,54 @@ void dump(unsigned char* buf, int size) {
     }
 }
 
-int check_protocol(unsigned char *packet)
-{
-	struct iphdr *ip = (struct iphdr *)packet;
-
-	if(ip->protocol == IPPROTO_UDP) 
-		return 1;
-
-	else if(ip->protocol == IPPROTO_TCP)
-
-		return 2;
-
-	return 0;
-}
-
-int get_length(unsigned char *packet)
+int get_ip_header_length(unsigned char *packet)
 {
 	struct iphdr *ip = (struct iphdr *)packet;
 	
 	return ip->ihl * 4;
 }
 
-void return_url(unsigned char *packet, int length, char *result, int id) // id -> 1 : udp, id -> 2 : tcp
+int get_tcp_header_length(unsigned char *packet)
 {
-	int size = 0, i, cnt = 0;
-	unsigned char *start;
-
-	if(id == 1)
-		start = packet + length + 8 + 12;
-	else
-	{
-		struct tcphdr *tcp = (struct tcphdr *)(packet + length);
-		start = packet + length + (tcp->th_off) * 4 + 12;
-	}
-
-	size = *start;
-
-	while(size > 0)
-	{
-		for(int i = 1; i <= size && cnt < 99; i++)
-			result[cnt++] = *(start + i);
-
-		start += size + 1;
-		size = *start;
-
-		result[cnt++] = '.';
-	}
-
+	struct tcphdr *tcp = (struct tcphdr *)packet;
+	
+	return tcp->th_off * 4;
 }
 
-int check_flag(unsigned char *packet)
+void return_url(unsigned char *packet, char *result)
+{
+	int cnt = 0;
+	struct iphdr *ip = (struct iphdr *)packet;
+	struct tcphdr *tcp = (struct tcphdr *)(packet + ip->ihl * 4);
+	unsigned char *start = packet + ip->ihl * 4 + tcp->th_off * 4;
+
+	for(int i = 0; i < 50; i++)
+	{
+		if( strncmp(start, "Host", 4) == 0)
+		{
+			start += 6;
+			while( *start != 0x0d)
+			{
+				result[cnt++] = *start;
+				start++;
+			}
+			return;
+		}
+		start++;
+	}
+		
+}
+
+int check_http(unsigned char *packet)
 {
 	struct iphdr *ip = (struct iphdr *)packet;
 
-	if( ntohs(packet[(ip->ihl) * 4 + 8 + 2]) < 0x1000)
-		return 1;
-
+	if(ip->protocol == IPPROTO_TCP)
+	{
+		struct tcphdr *tcp = (struct tcphdr *)(packet + ip->ihl * 4);
+		if(strncmp(packet + ip->ihl * 4 + tcp->th_off * 4, "GET", 3) == 0)
+					return 1;
+	}
 	return 0;
 }
 
@@ -91,7 +83,7 @@ int check_list(unsigned char *url)
 	{
 		if( strncmp(url, warning_list[i], strlen(warning_list[i])) == 0)
 		{
-			index = i;
+			list_index = i;
 			flag++;
 			break;
 		}
@@ -123,30 +115,13 @@ static u_int32_t print_pkt (struct nfq_data *tb)
     ifi = nfq_get_physoutdev(tb);
     ret = nfq_get_payload(tb, &data);
 
-    proto = check_protocol(data);
-
-    if(proto > 0)
-    {
-    	char result[200] = { 0, };
-    	if(proto == 1) // udp
-    	{
-    		if( check_flag(data) )
-    		{
-    			int ip_length = get_length(data);
-	    		return_url(data, ip_length, result, proto);
-	    		check_result = check_list(result);
-    		}
-	    	
-    	}
-
-    	else if (proto == 2) // tcp
-    	{
-    		int ip_length = get_length(data);
-    		return_url(data, ip_length, result, proto);
-    		check_result = check_list(result);
-    	}
-
-    }
+	if(check_http(data))
+	{
+		char result[200];
+		return_url(data, result);
+		printf("[*]URL : %s\n",result);
+		check_result = check_list(result);
+	}  	
 
     return id;
 }
@@ -158,7 +133,7 @@ static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
     u_int32_t id = print_pkt(nfa);
     if(check_result)
     {
-    	printf("[*]Warning in %s\n",warning_list[index]);
+    	printf("[*]Warning in %s\n",warning_list[list_index]);
     	return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
     }
 
