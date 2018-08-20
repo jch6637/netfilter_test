@@ -12,9 +12,10 @@
 #include <errno.h>
 #include <libnetfilter_queue/libnetfilter_queue.h>
 
-#define LEN 1
-char *warning_list[LEN] = { "nate.com" };
 int check_result, list_index;
+int url_length = 0;
+char *url_list[600000];
+int LEN;
 
 void dump(unsigned char* buf, int size) {
     int i;
@@ -51,7 +52,7 @@ void return_url(unsigned char *packet, char *result)
 		if( strncmp(start, "Host", 4) == 0)
 		{
 			start += 6;
-			while( *start != 0x0d)
+			while( *start != 0x0d && *start != 0x0a)
 			{
 				result[cnt++] = *start;
 				start++;
@@ -81,7 +82,7 @@ int check_list(unsigned char *url)
 	int flag = 0, i;
 	for(i = 0; i < LEN; i++)
 	{
-		if( strncmp(url, warning_list[i], strlen(warning_list[i])) == 0)
+		if( strncmp(url, *(url_list + i), strlen( *(url_list + i) ) - 1 )  == 0 )
 		{
 			list_index = i;
 			flag++;
@@ -90,6 +91,7 @@ int check_list(unsigned char *url)
 	}
 	return flag;
 }
+
 
 /* returns packet id */
 static u_int32_t print_pkt (struct nfq_data *tb)
@@ -121,11 +123,42 @@ static u_int32_t print_pkt (struct nfq_data *tb)
 		return_url(data, result);
 		printf("[*]URL : %s\n",result);
 		check_result = check_list(result);
+		memset(result, 0, 200);
 	}  	
 
     return id;
 }
 
+void setting_list(char *filename)
+{
+	FILE *fp;
+	int cnt = 0;
+
+	fp = fopen(filename, "r");
+
+	if(fp == NULL)
+	{
+		printf("URL File Open Error\n");
+		exit(0);
+	}
+
+	char tmp[2083];
+
+	while(1)
+	{
+		fgets(tmp, 2083,fp);
+		if(feof(fp))
+			break;
+		url_list[cnt] = (char *)malloc(sizeof(strlen(tmp)));
+		strncpy( *(url_list + cnt), tmp, strlen(tmp));
+		sleep(0.5);
+		memset(tmp, 0, 2083);
+		cnt++;
+	}
+
+	LEN = cnt;
+	fclose(fp);
+}
 
 static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
           struct nfq_data *nfa, void *data)
@@ -133,7 +166,8 @@ static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
     u_int32_t id = print_pkt(nfa);
     if(check_result)
     {
-    	printf("[*]Warning in %s\n",warning_list[list_index]);
+    	printf("[*]Warning in %s", url_list[list_index]);
+    	check_result = 0;
     	return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
     }
 
@@ -148,6 +182,8 @@ int main(int argc, char **argv)
     int fd;
     int rv;
     char buf[4096] __attribute__ ((aligned));
+
+    setting_list(argv[2]);
 
     printf("opening library handle\n");
     h = nfq_open();
@@ -190,14 +226,6 @@ int main(int argc, char **argv)
             continue;
         }
 
-        /* if your application is too slow to digest the packets that
-         * are sent from kernel-space, the socket buffer that we use
-         * to enqueue packets may fill up returning ENOBUFS. Depending
-         * on your application, this error may be ignored. nfq_nlmsg_verdict_putPlease, see
-         * the doxygen documentation of this library on how to improve
-         * this situation.
-         */
-
         if (rv < 0 && errno == ENOBUFS) {
             printf("losing packets!\n");
             continue;
@@ -210,8 +238,6 @@ int main(int argc, char **argv)
     nfq_destroy_queue(qh);
 
 #ifdef INSANE
-    /* normally, applications SHOULD NOT issue this command, since
-     * it detaches other programs/sockets from AF_INET, too ! */
     printf("unbinding from AF_INET\n");
     nfq_unbind_pf(h, AF_INET);
 #endif
